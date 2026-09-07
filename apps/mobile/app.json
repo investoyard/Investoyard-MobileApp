@@ -1,0 +1,26 @@
+{
+  "expo": {
+    "name": "Investoyard",
+    "slug": "investoyard",
+    "scheme": "investoyard",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "plugins": [
+      "expo-router",
+      "expo-font"
+    ],
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#3c2e7e"
+    },
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "co.finwave.investoyard"
+    },
+    "android": {
+      "package": "co.finwave.investoyard"
+    }
+  }
+}

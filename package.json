@@ -1,0 +1,24 @@
+{
+  "name": "investoyard-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Investoyard mobile app (Expo React Native) — subset of the internal monorepo, published to this repo for mobile-focused access.",
+  "packageManager": "npm@11.8.0",
+  "workspaces": [
+    "apps/mobile",
+    "packages/*"
+  ],
+  "scripts": {
+    "typecheck": "cd apps/mobile && npx tsc --noEmit",
+    "postinstall": "node scripts/link-expo-router.js"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  },
+  "overrides": {
+    "react-native": "0.74.5"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

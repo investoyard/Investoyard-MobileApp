@@ -1,0 +1,45 @@
+# deps & build output
+node_modules/
+dist/
+dist-dev/
+out/
+.next/
+.turbo/
+coverage/
+.expo/
+.expoexport/
+
+# local dev infrastructure (portable Postgres/Redis binaries + data)
+.tools/
+.pgdata/
+.redisdata/
+
+# logs & scratch
+*.log
+*.tsbuildinfo
+.apilog.txt
+.apilog2.txt
+.redislog.txt
+.expolog.txt
+.buildall.log
+.testall.log
+
+# secrets — never commit env files (examples are allowlisted)
+.env
+.env.*
+!.env.example
+!deploy/.env.production.example
+.env.deploy
+# PII vault master key — never commit; back it up securely out-of-band
+.pii-vault.key
+*.pii-vault.key
+
+# editor/os
+.DS_Store
+Thumbs.db
+
+# API-uploaded images (logos)
+apps/api/uploads/
+
+# exchange API documentation (member-confidential; kept out of the repo)
+apis/
