@@ -75,14 +75,39 @@ describe('mainboard — retail is a range, and bHNI is the ₹10 L band', () => 
   });
 });
 
-describe('categories with no regulatory minimum', () => {
-  it('returns 0 rather than guessing', () => {
-    // Employee / shareholder bidding patterns vary too widely to derive an
-    // "applications for 1x" — 0 means not derivable, and callers must not
-    // divide by it.
-    for (const cat of ['employee', 'shareholder', 'other', 'total']) {
+describe('the reserved quotas bid in ONE lot', () => {
+  /**
+   * Settled with data, not argument (2026-09-30). These returned 0 — "no
+   * standard min-bid rule" — which made `Req 1x` print 0 and was the whole
+   * reason employee and shareholder left the Application-wise table on
+   * 2026-09-28. The demand says otherwise: every employee row carrying real
+   * share figures is an exact multiple of the lot (4 of 4, retail 20 of 20 as
+   * the control). And the minimum is ONE lot, not two — three of those four
+   * are not multiples of two lots, which a two-lot minimum could not produce.
+   */
+  const MAINBOARD = { lotSize: 55, priceCap: 272 };
+
+  it('is one lot for employee, shareholder and policyholder', () => {
+    for (const cat of ['employee', 'shareholder', 'policyholder']) {
+      expect(minApplicationLots(cat, MAINBOARD)).toBe(1);
+      expect(minApplicationShares(cat, MAINBOARD)).toBe(55);
+      // SME is UNEVIDENCED — no SME issue carries a reserved quota — so one lot
+      // is the conservative floor there too, since no bid can be smaller.
+      expect(minApplicationShares(cat, SAI_URJA)).toBe(1200);
+    }
+  });
+
+  it('reproduces the real employee demand as whole lots', () => {
+    // RUNWALENTR: 1,12,259 employee shares against a lot of 49.
+    expect(1_12_259 % minApplicationShares('employee', { lotSize: 49, priceCap: 305 })).toBe(0);
+    // ...and NOT a multiple of two lots, which is what rules out a 2-lot minimum.
+    expect(1_12_259 % 98).not.toBe(0);
+  });
+
+  it('still returns 0 where there is genuinely no category', () => {
+    for (const cat of ['other', 'total']) {
       expect(minApplicationShares(cat, SAI_URJA)).toBe(0);
-      expect(minApplicationShares(cat, { lotSize: 55, priceCap: 272 })).toBe(0);
+      expect(minApplicationShares(cat, MAINBOARD)).toBe(0);
     }
   });
 
@@ -90,5 +115,47 @@ describe('categories with no regulatory minimum', () => {
     expect(minApplicationShares('retail', { lotSize: 0, priceCap: 272 })).toBe(0);
     expect(minApplicationShares('retail', { lotSize: 55, priceCap: 0 })).toBe(0);
     expect(minApplicationShares('retail', {})).toBe(0);
+  });
+});
+
+/**
+ * DOVE SOFT LIMITED — BSE SME, RHP dated 22 September 2026, Offer Structure on
+ * page 267. The price band and bid lot were still `[●]`, so the lot is the GCD
+ * of the four stated portions (1,200 — and it can be nothing else: 64,800 is
+ * not divisible by 1,600, the only larger candidate).
+ *
+ *   Offer                 66,00,000
+ *   Market maker           3,30,000   (5.00%)
+ *   Net Offer             62,70,000
+ *     QIB                    64,800   (  1.03% of net —  54 lots)
+ *     NII                 30,70,800   ( 48.98% of net — 2,559 lots)
+ *     Individual          31,34,400   ( 49.99% of net — 2,612 lots)
+ *
+ * This is here as a FIXTURE, not as a rounding rule. It shows the SME
+ * individual minimum holding at two lots on a second issuer, and it shows the
+ * published counts landing on whole lots. It does NOT show the counts being
+ * rounded to a minimum-application multiple — see the note in CLAUDE.md.
+ */
+describe('DOVE SOFT RHP — the SME individual minimum holds at two lots', () => {
+  // The band was undecided; the individual minimum is two lots at ANY price,
+  // which is the whole point of the SME branch, so the cap is immaterial here.
+  const DOVESOFT = { lotSize: 1200, priceCap: 118, sme: true };
+  const NET_OFFER = 62_70_000;
+  const INDIVIDUAL = 31_34_400;
+  const NII = 30_70_800;
+  const QIB = 64_800;
+
+  it('the stated portions add up to the net offer', () => {
+    expect(QIB + NII + INDIVIDUAL).toBe(NET_OFFER);
+  });
+
+  it('the individual portion is a whole number of minimum applications', () => {
+    expect(minApplicationShares('retail', DOVESOFT)).toBe(2_400);
+    expect(INDIVIDUAL % 2_400).toBe(0);
+    expect(INDIVIDUAL / 2_400).toBe(1_306);
+  });
+
+  it('every portion is a whole number of lots', () => {
+    for (const n of [QIB, NII, INDIVIDUAL, 3_30_000]) expect(n % 1200).toBe(0);
   });
 });

@@ -21,7 +21,7 @@ function resolveApiBase(): string {
   return 'http://localhost:3000/api';
 }
 
-const API_BASE = resolveApiBase();
+export const API_BASE = resolveApiBase();
 
 const MOCK: IpoDetail[] = [
   {
@@ -157,6 +157,62 @@ export async function withdrawApplication(token: string, id: string): Promise<bo
   } catch {
     return false;
   }
+}
+
+/**
+ * Change the UPI ID on a placed application (requirement 2).
+ *
+ * Throws with the SERVER's wording on refusal — "the funds are already blocked
+ * …" is the whole value of this call, and a generic failure message would lose
+ * the one sentence that tells the investor what to do instead.
+ */
+export async function changeApplicationUpi(
+  token: string,
+  id: string,
+  upiId: string,
+): Promise<{ restatedToExchange: number; note: string }> {
+  const res = await fetch(`${API_BASE}/applications/${id}/change-upi`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ upiId }),
+  });
+  if (!res.ok) {
+    let msg = `Could not save (HTTP ${res.status})`;
+    try {
+      const b = await res.json();
+      if (b?.message) msg = Array.isArray(b.message) ? b.message.join(', ') : String(b.message);
+    } catch {}
+    throw new Error(msg);
+  }
+  const b = await res.json();
+  return b?.upiChange ?? { restatedToExchange: 0, note: 'Saved.' };
+}
+
+/**
+ * Ask the issue's sponsor bank(s) to release funds left blocked after allotment.
+ *
+ * `dev: true` means SMTP is not configured: composed and recorded, NOT
+ * delivered. The caller shows the server's `note`, which says so — telling an
+ * investor it was sent would leave them waiting on a reply to a mail nobody got.
+ */
+export async function requestUnblock(
+  token: string,
+  id: string,
+): Promise<{ sent: boolean; dev: boolean; to: string; stuckAmount?: number; note: string }> {
+  const res = await fetch(`${API_BASE}/applications/${id}/unblock-request`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: '{}',
+  });
+  if (!res.ok) {
+    let msg = `Could not send (HTTP ${res.status})`;
+    try {
+      const b = await res.json();
+      if (b?.message) msg = Array.isArray(b.message) ? b.message.join(', ') : String(b.message);
+    } catch {}
+    throw new Error(msg);
+  }
+  return res.json();
 }
 
 export async function listApplications(token: string): Promise<ApplicationView[]> {

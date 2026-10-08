@@ -66,6 +66,12 @@ export interface RulePack {
    * post-anchor QIB book. Spec §5 Step 4 derives both, separately.
    */
   anchorMfPct: number;
+  /**
+   * Share of the ANCHOR book reserved for domestic life insurers and pension
+   * funds -- VERIFY. With `anchorMfPct` it accounts for 40% of the anchor
+   * portion. 0 where there is no anchor round at all (fixed price, SME).
+   */
+  anchorInsPensionPct: number;
   /** SME must reserve at least this share of the issue for the market maker -- VERIFY.
    *  0 on Mainboard, which has no market maker. */
   marketMakerMinPct: number;
@@ -76,6 +82,16 @@ export interface RulePack {
   thresholds: Record<string, CategoryThreshold>;
   /** which price scenario the minimum application is quoted at */
   applicationThresholdBasis: 'cap' | 'floor' | 'final';
+  /**
+   * What ONE LOT must be worth at the primary price — SEBI's mainboard
+   * minimum-application band. Absent on SME, where the individual bid is two
+   * lots and no rupee band expresses it; W04 then stays silent rather than
+   * guessing, on the same principle as B11/B12 outside a known holiday year.
+   */
+  lotValueRange?: { min: number; max: number };
+  /** ICDR's ceiling on a shareholder reservation, as a % of the issue size.
+   *  Absent on SME, which does not offer one. */
+  shareholderMaxPctOfIssue?: number;
 }
 
 /*
@@ -147,7 +163,10 @@ export const RULE_PACKS: Record<string, RulePack> = {
     mfPctOfNetQib: 5,
     anchorMaxPctOfQib: 60,
     anchorMfPct: 33.33,
+    anchorInsPensionPct: 6.67,
     marketMakerMinPct: 0,
+    lotValueRange: { min: 10_000, max: 15_000 },
+    shareholderMaxPctOfIssue: 10,
     biddingDays: { min: 3, max: 10 },
     listingWorkingDaysAfterClose: 3,
     thresholds: THRESHOLDS,
@@ -160,7 +179,10 @@ export const RULE_PACKS: Record<string, RulePack> = {
     mfPctOfNetQib: 5,
     anchorMaxPctOfQib: 60,
     anchorMfPct: 33.33,
+    anchorInsPensionPct: 6.67,
     marketMakerMinPct: 0,
+    lotValueRange: { min: 10_000, max: 15_000 },
+    shareholderMaxPctOfIssue: 10,
     biddingDays: { min: 3, max: 10 },
     listingWorkingDaysAfterClose: 3,
     thresholds: THRESHOLDS,
@@ -173,7 +195,10 @@ export const RULE_PACKS: Record<string, RulePack> = {
     mfPctOfNetQib: 0,
     anchorMaxPctOfQib: 0,
     anchorMfPct: 0,
+    anchorInsPensionPct: 0,
     marketMakerMinPct: 0,
+    lotValueRange: { min: 10_000, max: 15_000 },
+    shareholderMaxPctOfIssue: 10,
     biddingDays: { min: 3, max: 10 },
     listingWorkingDaysAfterClose: 3,
     thresholds: THRESHOLDS,
@@ -186,6 +211,7 @@ export const RULE_PACKS: Record<string, RulePack> = {
     mfPctOfNetQib: 0,
     anchorMaxPctOfQib: 60,
     anchorMfPct: 33.33,
+    anchorInsPensionPct: 6.67,
     marketMakerMinPct: 5,
     biddingDays: { min: 3, max: 10 },
     listingWorkingDaysAfterClose: 3,
@@ -199,6 +225,7 @@ export const RULE_PACKS: Record<string, RulePack> = {
     mfPctOfNetQib: 0,
     anchorMaxPctOfQib: 0,
     anchorMfPct: 0,
+    anchorInsPensionPct: 0,
     marketMakerMinPct: 5,
     biddingDays: { min: 3, max: 10 },
     listingWorkingDaysAfterClose: 3,

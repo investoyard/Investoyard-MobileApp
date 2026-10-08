@@ -14,6 +14,11 @@ export * from './stage';
 export * from './holidays';
 export * from './carveouts';
 export * from './minApplication';
+export * from './offerTotals';
+export * from './issueInputs';
+export * from './ipoDerive';
+export * from './demat';
+import type { DematAccountView } from './demat';
 
 export type IpoType = 'mainboard' | 'sme';
 export type IpoStatus = 'upcoming' | 'open' | 'closed' | 'listed' | 'withdrawn';
@@ -84,6 +89,8 @@ export interface ConsentNotice {
 /** One family member's bid inside a bulk apply. */
 export interface BulkApplicant {
   investorProfileId: string;
+  /** Which demat this applicant credits to. Omit or null = the profile default. */
+  dematAccountId?: string | null;
   lots: number;
   atCutoff?: boolean;
   bidPrice?: number;
@@ -159,9 +166,18 @@ export interface ProfileView {
   relationship: 'self' | 'spouse' | 'child' | 'mother' | 'father' | 'parent' | 'sibling' | 'other';
   fullName: string;
   pan: string;            // masked
+  /** The profile's OWN demat — its default. Unchanged, and still what every
+   *  existing reader uses; `demats[0]` is the same account. */
   depository: Depository;
   dpId: string;
   clientId: string;
+  /**
+   * EVERY demat on this profile, default first, built server-side by
+   * `dematAccountsFor()` so no client re-derives the join (2026-10-08).
+   * Always at least one. Optional on the type only so an older client that has
+   * not been rebuilt still compiles.
+   */
+  demats?: DematAccountView[];
   hasUpi: boolean;
   hasBank: boolean;
   kycStatus: 'unverified' | 'verified' | 'failed';
@@ -193,12 +209,37 @@ export interface ApplicationView {
   allotmentOddsPct?: number;
   /** While 'submitted': applicant details still blocking the exchange bid (UPI / demat). */
   missingDetails?: string[];
+  /**
+   * The exchange's own sentence about the UPI mandate, and when it was observed.
+   *
+   * Shown BESIDE our status line, never instead of it: `status` collapses eleven
+   * exchange codes onto five of ours, and the three rejections an investor can
+   * act on differently — they declined it themselves, the UPI ID was invalid,
+   * the sponsor bank refused — all land on `rejected`. Absent until the rail
+   * reports on the bid, which is every application today.
+   */
+  upiStatusText?: string;
+  upiStatusAt?: string;
+  /**
+   * The sponsor-bank unblock request (requirement 1), decided SERVER-SIDE by
+   * `mayRequestUnblock` — the UI must not re-derive "is the bank late yet".
+   * `unblockAvailable` is set only when the request would succeed;
+   * `unblockReason` explains a no that is worth explaining (money outstanding
+   * but inside the grace period or the cooldown), and is absent when there is
+   * nothing stuck at all.
+   */
+  unblockAvailable?: boolean;
+  unblockReason?: string;
+  unblockStuckAmount?: number;
+  unblockRequestedAt?: string;
 }
 
 export type ApplicantCategory = 'individual' | 'shareholder' | 'employee';
 
 export interface CreateApplicationInput {
   investorProfileId: string;
+  /** Which demat the allotment credits to. Omit or null = the profile default. */
+  dematAccountId?: string | null;
   ipoId: string;
   category: string;
   applicantType?: ApplicantCategory;
@@ -214,3 +255,5 @@ export interface CreateApplicationInput {
 export * from './masterMatch';
 export * from './operationalContract';
 export * from './bidRules';
+export * from './unblockRules';
+export * from './sponsorBank';

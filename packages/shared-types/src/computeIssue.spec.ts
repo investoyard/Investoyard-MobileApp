@@ -656,3 +656,221 @@ describe('ESDS — stated share counts drive the split', () => {
     expect(ok.issues.filter((i) => i.code === 'W02')).toHaveLength(0);
   });
 });
+
+/**
+ * W04 — the minimum application VALUE. SEBI puts a mainboard bid lot between
+ * ₹10,000 and ₹15,000 at the primary price, which is the cheapest available
+ * guard against a mis-keyed lot size.
+ *
+ * Calibrated against the catalogue before it was written: **470 of the 471
+ * mainboard records already sit inside the band**, and the single exception is
+ * an FPO — so the rule is scoped to `instrument: 'ipo'` and its only firing
+ * would otherwise have been a false positive.
+ */
+describe('computeIssue — W04 minimum application value', () => {
+  const base = {
+    board: 'mainboard' as const, mechanism: 'book_built' as const,
+    ofs: { basis: 'shares' as const, value: 1_00_00_000 },
+    reservation: { qib: 50, hni: 10, hni2: 5, retail: 35 },
+  };
+  const w04 = (i: any) => computeIssue(i).issues.filter((x) => x.code === 'W04');
+
+  it('stays quiet inside the band', () => {
+    // ORIENTCABL — 55 × ₹272 = ₹14,960
+    expect(w04({ ...base, lotSize: 55, priceFloor: 250, priceCap: 272 })).toHaveLength(0);
+    // the worked example — 70 × ₹200 = ₹14,000
+    expect(w04({ ...base, lotSize: 70, priceFloor: 190, priceCap: 200 })).toHaveLength(0);
+  });
+
+  it('warns — never blocks — when a lot is worth too little or too much', () => {
+    const low = w04({ ...base, lotSize: 4, priceFloor: 1556, priceCap: 1638 });
+    expect(low).toHaveLength(1);
+    expect(low[0].severity).toBe('warning');
+    expect(low[0].message).toMatch(/₹6,552/);
+    expect(w04({ ...base, lotSize: 700, priceFloor: 190, priceCap: 200 })).toHaveLength(1);
+  });
+
+  it('exempts a follow-on, which is priced against a listed market price', () => {
+    // Adani Enterprises' FPO — the catalogue's ONLY record outside the band.
+    const adani = { ...base, lotSize: 4, priceFloor: 1556, priceCap: 1638 };
+    expect(w04({ ...adani, instrument: 'fpo' })).toHaveLength(0);
+    expect(w04({ ...adani, instrument: 'ipo' })).toHaveLength(1);
+    expect(w04(adani)).toHaveLength(1); // absent means 'ipo'
+  });
+
+  it('is silent on SME, where no rupee band expresses a two-lot minimum', () => {
+    // SAIURJA — 1,200 × ₹113 = ₹1,35,600, far outside the mainboard band and
+    // entirely correct. A rule that guessed here would flag every SME issue.
+    expect(w04({
+      ...base, board: 'sme', lotSize: 1200, priceFloor: 107, priceCap: 113,
+      carveouts: [{ key: 'marketmaker', basis: 'shares' as const, value: 2_16_000 }],
+    })).toHaveLength(0);
+  });
+});
+
+/**
+ * W05 — the shareholder reservation cap. No record in the catalogue carries a
+ * shareholder carve-out today, so this is a guard for the historical import.
+ * A WARNING because the cap is well attested but its basis (issue size vs
+ * post-issue capital) is the operator's to confirm; the message names it.
+ */
+describe('computeIssue — W05 shareholder reservation cap', () => {
+  const base = {
+    board: 'mainboard' as const, mechanism: 'book_built' as const,
+    lotSize: 70, priceFloor: 190, priceCap: 200,
+    ofs: { basis: 'shares' as const, value: 1_00_00_000 },
+    reservation: { qib: 50, hni: 10, hni2: 5, retail: 35 },
+  };
+  const w05 = (i: any) => computeIssue(i).issues.filter((x) => x.code === 'W05');
+
+  it('accepts a reservation at or under a tenth of the issue', () => {
+    expect(w05(base)).toHaveLength(0); // none entered at all
+    expect(w05({ ...base, carveouts: [{ key: 'shareholder', basis: 'shares', value: 10_00_000 }] })).toHaveLength(0);
+  });
+
+  it('warns above it, and says what the figure works out to', () => {
+    const over = w05({ ...base, carveouts: [{ key: 'shareholder', basis: 'shares', value: 15_00_000 }] });
+    expect(over).toHaveLength(1);
+    expect(over[0].severity).toBe('warning');
+    expect(over[0].message).toMatch(/15% of the issue/);
+    expect(over[0].message).toMatch(/caps it at 10%/);
+  });
+
+  it('reads a ₹ Cr carve-out at the primary price', () => {
+    // ₹40 Cr at ₹200 = 20,00,000 shares = 20% of a 1,00,00,000-share offer
+    expect(w05({ ...base, carveouts: [{ key: 'shareholder', basis: 'amount', value: 40 }] })).toHaveLength(1);
+  });
+
+  it('says nothing about the EMPLOYEE quota, whose cap is a different denominator', () => {
+    // ICDR measures the employee cap against POST-ISSUE CAPITAL, which this
+    // engine is never given. A check against the wrong denominator is worse
+    // than none.
+    const r = computeIssue({ ...base, carveouts: [{ key: 'employee', basis: 'shares', value: 50_00_000 }] } as any);
+    expect(r.issues.filter((x) => x.code === 'W05')).toHaveLength(0);
+  });
+});
+
+/**
+ * The anchor book carries TWO reserved slices, not one: a third for domestic
+ * mutual funds and a further 6.67% for domestic life insurers and pension
+ * funds — 40% of the anchor portion between them. Both are ALLOCATION figures
+ * (floored to a lot), because a reserved slice is an allocation question and
+ * not a published one, which is the same ruling `anchorMfShares` follows.
+ */
+describe('computeIssue — the anchor insurer / pension slice', () => {
+  const r = () => computeIssue(MVELECTRO).primary!.anchor!;
+
+  it('is 6.67% of the anchor book, floored to a lot', () => {
+    const a = r();
+    expect(a.anchorInsPensionShares).toBe(floorToLot(a.shares * 0.0667, MVELECTRO.lotSize!));
+  });
+
+  it('is a DIFFERENT figure from either mutual-fund one', () => {
+    const a = r();
+    expect(a.anchorInsPensionShares).not.toBe(a.anchorMfShares);
+    expect(a.anchorInsPensionShares).not.toBe(a.qibMfShares);
+    // the MF third is roughly five times the insurer slice (33.33 vs 6.67)
+    expect(a.anchorMfShares).toBeGreaterThan(a.anchorInsPensionShares * 4);
+  });
+
+  it('and the two anchor slices together stay inside 40% of the book', () => {
+    const a = r();
+    expect(a.anchorMfShares + a.anchorInsPensionShares).toBeLessThanOrEqual(a.shares * 0.4);
+  });
+
+  it('is zero on a pack with no anchor round', () => {
+    const fixed = computeIssue({ ...MVELECTRO, mechanism: 'fixed_price' });
+    expect(fixed.primary?.anchor?.anchorInsPensionShares ?? 0).toBe(0);
+  });
+});
+
+/**
+ * B18 only speaks once there is an offer structure to attach a market maker to.
+ *
+ * Without that guard it fired 506 times across the SME catalogue and 505 of
+ * those were bare imported rows with no reservation table at all — so the one
+ * record where the market maker is genuinely wrong was invisible.
+ */
+describe('computeIssue — B18 waits for a reservation table', () => {
+  const bare = {
+    board: 'sme' as const, mechanism: 'book_built' as const, lotSize: 1200,
+    priceFloor: 96, priceCap: 101, issueSizeCr: 44,
+    reservation: {}, // nothing entered yet — the imported-row shape
+  };
+  const b18 = (i: any) => computeIssue(i).issues.filter((x) => x.code === 'B18');
+
+  it('stays silent on a record with no reservation table', () => {
+    expect(b18(bare)).toHaveLength(0);
+    // ...and on one where every percentage is present but zero.
+    expect(b18({ ...bare, reservation: { qib: 0, hni: 0, hni2: 0, retail: 0 } })).toHaveLength(0);
+  });
+
+  it('still blocks once a split exists and no market maker does', () => {
+    const withSplit = { ...bare, reservation: { qib: 50, hni: 10, hni2: 5, retail: 35 } };
+    expect(b18(withSplit)).toHaveLength(1);
+    expect(b18(withSplit)[0].severity).toBe('blocking');
+    expect(b18(withSplit)[0].message).toMatch(/None is entered/);
+  });
+
+  it('catches a market maker UNDER the floor — the case that was buried', () => {
+    // KHERIAAUTO: ₹2 Cr against a ₹44 Cr issue is 4.55%, short of 5%.
+    const kheria = {
+      ...bare, reservation: { qib: 50, hni: 10, hni2: 5, retail: 35 },
+      carveouts: [{ key: 'marketmaker', basis: 'amount' as const, value: 2 }],
+    };
+    const hit = b18(kheria);
+    expect(hit).toHaveLength(1);
+    expect(hit[0].message).toMatch(/4\.55% of the issue/);
+    expect(hit[0].message).toMatch(/at least 5%/);
+  });
+
+  it('accepts one that meets the floor', () => {
+    expect(b18({
+      ...bare, reservation: { qib: 50, hni: 10, hni2: 5, retail: 35 },
+      carveouts: [{ key: 'marketmaker', basis: 'amount', value: 2.2 }],
+    })).toHaveLength(0);
+  });
+});
+
+/**
+ * W01 flags an UNUSUAL NII split, which is the issuer's business and so a
+ * warning. Its tolerance has to be loose enough to tell that apart from an
+ * operator writing two decimals: a 2:1 quota only lands on 2 dp when the NII
+ * total divides by 3, and the three catalogue records that tripped it each
+ * missed by exactly 0.00333 pp.
+ */
+describe('computeIssue — W01 tolerates 2-decimal entry, not a real off-ratio split', () => {
+  const base = {
+    board: 'mainboard' as const, mechanism: 'book_built' as const, lotSize: 70,
+    priceFloor: 190, priceCap: 200, issueSizeCr: 500,
+  };
+  const w01 = (hni: number, hni2: number, rest: Record<string, number> = {}) =>
+    computeIssue({ ...base, reservation: { qib: 50, retail: 35, hni, hni2, ...rest } })
+      .issues.filter((x) => x.code === 'W01');
+
+  it('stays quiet on the three real records that only rounded', () => {
+    expect(w01(10.03, 5.01)).toHaveLength(0);   // SKYWAYS
+    expect(w01(19.33, 9.67)).toHaveLength(0);   // VNL
+    expect(w01(26.67, 13.33)).toHaveLength(0);  // ANNU
+  });
+
+  it('stays quiet on a split that IS exactly 2:1, at any size', () => {
+    expect(w01(10, 5)).toHaveLength(0);
+    expect(w01(24, 12)).toHaveLength(0); // a legal 6(1) issuer offering more NII
+  });
+
+  it('still warns on a genuinely off-ratio split', () => {
+    expect(w01(20, 16)).toHaveLength(1);
+    expect(w01(20, 16)[0].severity).toBe('warning');
+    // and on a slip an order of magnitude smaller than that
+    expect(w01(10.13, 5.01)).toHaveLength(1);
+  });
+
+  it('leaves the TRANSPOSITION case to B02, which blocks', () => {
+    const r = computeIssue({ ...base, reservation: { qib: 50, retail: 35, hni: 5, hni2: 10 } });
+    expect(r.issues.filter((x) => x.code === 'W01')).toHaveLength(0);
+    const b02 = r.issues.filter((x) => x.code === 'B02' && /transposed/.test(x.message));
+    expect(b02).toHaveLength(1);
+    expect(b02[0].severity).toBe('blocking');
+  });
+});
