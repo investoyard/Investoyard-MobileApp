@@ -91,6 +91,57 @@ export interface TenantContact {
 export const TENANT_CONTENT_KEYS = ['identity', 'contact'] as const;
 export type TenantContentKey = (typeof TENANT_CONTENT_KEYS)[number];
 
+/**
+ * The RICH-TEXT pages, and **a separate list from `TENANT_CONTENT_KEYS` for a
+ * load-bearing reason**: the public `/tenants` registry folds on that list, so
+ * adding a page key to it would put every partner's legal prose on the response
+ * that EVERY page load fetches to resolve its brand. These are fetched one at a
+ * time, by the page that renders them.
+ *
+ * They share the `TenantContent` table — a row per key — so no migration was
+ * needed to add them.
+ */
+export const TENANT_PAGE_KEYS = ['about', 'terms', 'privacy', 'disclaimer'] as const;
+export type TenantPageKey = (typeof TENANT_PAGE_KEYS)[number];
+
+/** Everything an admin may write. The union is the write whitelist. */
+export const TENANT_WRITABLE_KEYS = [...TENANT_CONTENT_KEYS, ...TENANT_PAGE_KEYS] as const;
+export type TenantWritableKey = (typeof TENANT_WRITABLE_KEYS)[number];
+
+/** What a page row stores. `html` is operator-authored and sanitised ON READ. */
+export interface TenantPage {
+  html?: string;
+}
+
+/** Title and menu label for each page, so four surfaces cannot disagree. */
+export const PAGE_LABEL: Readonly<Record<TenantPageKey, string>> = Object.freeze({
+  about: 'About us',
+  terms: 'Terms & Conditions',
+  privacy: 'Privacy Policy',
+  disclaimer: 'Disclaimer',
+});
+
+/**
+ * The three pages a white-label MUST publish before facing customers, and the
+ * one that is merely advisable.
+ *
+ * TERMS, PRIVACY AND DISCLAIMER ARE LEGAL INSTRUMENTS BETWEEN THE PARTNER AND
+ * THEIR CLIENT. Ours under their brand would be a contract naming the wrong
+ * company, offered to people who never dealt with us — which is why nothing
+ * inherits and why their absence blocks rather than merely warns. `about` is a
+ * gap in the shop window, not a liability.
+ */
+export const REQUIRED_PAGE_KEYS: readonly TenantPageKey[] = ['terms', 'privacy', 'disclaimer'];
+
+/** True when the stored page has something to render. */
+export function hasPage(page?: TenantPage): boolean {
+  const h = page?.html;
+  if (typeof h !== 'string') return false;
+  /* An "empty" TipTap document is `<p></p>`, not ''. Treating that as present
+     would publish a blank page and clear the gap that should still be open. */
+  return h.replace(/<[^>]*>/g, '').replace(/&nbsp;|\s/g, '').length > 0;
+}
+
 /** Everything a site needs about its own operator. Both halves may be absent. */
 export interface TenantContent {
   identity?: TenantIdentity;
@@ -209,7 +260,7 @@ export function mergeContentPatch<T extends object>(
 /* -------------------------------------------------------------------- gaps */
 
 export interface ContentGap {
-  key: TenantContentKey;
+  key: TenantWritableKey;
   field: string;
   /** What our staff should see in the admin panel. */
   label: string;
@@ -232,7 +283,9 @@ export interface ContentGap {
  * Returns nothing for the default channel: our own site's gaps are ours to
  * manage, and listing them beside a partner's would read as the same obligation.
  */
-export function contentGaps(input: IdentityInput & { contact?: TenantContact }): ContentGap[] {
+export function contentGaps(
+  input: IdentityInput & { contact?: TenantContact; pages?: Partial<Record<TenantPageKey, TenantPage>> },
+): ContentGap[] {
   if (input.isDefault) return [];
   const id = resolveIdentity(input);
   const c = resolveContact(input.contact);
@@ -252,10 +305,63 @@ export function contentGaps(input: IdentityInput & { contact?: TenantContact }):
   need('contact', 'supportPhone', 'Support phone', 'advisory', c.supportPhone);
   need('identity', 'sebiRegistration', 'SEBI registration number', 'advisory', id.sebiRegistration);
   need('identity', 'registeredAddress', 'Registered office address', 'advisory', id.registeredAddress);
+
+  /* The published pages. A missing legal page BLOCKS: see REQUIRED_PAGE_KEYS. */
+  for (const key of TENANT_PAGE_KEYS) {
+    const present = hasPage(input.pages?.[key]);
+    if (present) continue;
+    gaps.push({
+      key,
+      field: 'html',
+      label: PAGE_LABEL[key],
+      severity: REQUIRED_PAGE_KEYS.includes(key) ? 'blocking' : 'advisory',
+    });
+  }
   return gaps;
 }
 
 /** True when nothing blocking is outstanding — the Phase 1 half of go-live. */
-export function contentReady(input: IdentityInput & { contact?: TenantContact }): boolean {
+export function contentReady(
+  input: IdentityInput & { contact?: TenantContact; pages?: Partial<Record<TenantPageKey, TenantPage>> },
+): boolean {
   return !contentGaps(input).some((g) => g.severity === 'blocking');
+}
+
+/* ------------------------------------------------------------------ who may
+ * edit which identity field
+ *
+ * A white-label partner publishes their own site, so they must be able to keep
+ * it correct — a grievance officer leaves the company and their clients lose
+ * the escalation route until someone emails the operator. But the LEGAL ENTITY
+ * and its REGISTRATIONS are what the empanelment was approved against: a
+ * partner rewriting those is not an edit, it is a different company, the same
+ * reason `updateTenant` freezes PAN / GSTIN / entityType after approval.
+ *
+ * So the split is by KIND, not by panel: anything that IDENTIFIES the entity or
+ * its registrations is operator-only; anything that says HOW TO REACH THEM is
+ * the partner's. `contact` is wholly theirs.
+ *
+ * ONE LIST, exported, because the server strips these from a partner's patch
+ * and the admin screen renders them read-only — and two copies of that rule
+ * would eventually disagree about which fields a partner may touch.
+ */
+export const OPERATOR_ONLY_IDENTITY_FIELDS = ['legalName', 'sebiRegistration', 'cin', 'gstin'] as const;
+export type OperatorOnlyIdentityField = (typeof OPERATOR_ONLY_IDENTITY_FIELDS)[number];
+
+export const isOperatorOnlyIdentityField = (k: string): k is OperatorOnlyIdentityField =>
+  (OPERATOR_ONLY_IDENTITY_FIELDS as readonly string[]).includes(k);
+
+/**
+ * Drop the operator-only fields from an identity patch.
+ *
+ * DROP, never refuse: the panel posts every box it renders (which is what makes
+ * a cleared field DELETE rather than linger — see `mergeContentPatch`), so a
+ * partner saving a contact change would otherwise be rejected for sending back
+ * the legal name it had just shown them, unchanged. Dropping leaves the stored
+ * value untouched, because a key the patch does not mention is left alone.
+ */
+export function stripOperatorOnlyIdentity<T extends Record<string, unknown>>(patch: T): Partial<T> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(patch ?? {})) if (!isOperatorOnlyIdentityField(k)) out[k] = v;
+  return out as Partial<T>;
 }

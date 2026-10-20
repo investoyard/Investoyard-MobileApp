@@ -66,31 +66,191 @@ export async function getConsentNotices(): Promise<ConsentNotice[]> {
   return [];
 }
 
-export async function requestOtp(mobile: string): Promise<{ requestId: string }> {
-  try {
-    const res = await fetch(`${API_BASE}/auth/otp/request`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mobile }),
-    });
-    if (res.ok) return res.json();
-  } catch {}
-  /* No offline fallback. A `mock-` requestId opened the OTP screen on a request
-     the server never saw, and the code below then accepted 123456 against it —
-     a login with no account behind it. Fail here so the screen can say so. */
-  throw new Error('Could not reach Investoyard. Check your connection and try again.');
+/**
+ * The outcome of asking for a code.
+ *
+ * `no_account` and `have_account` are the WRONG-DOOR answers, and they now
+ * arrive BEFORE an SMS is sent. Until this existed a new customer paid for a
+ * code, typed it, and only then learned they had to sign up.
+ */
+export type OtpRequestResult =
+  | { ok: true; requestId: string; channel?: string }
+  | { ok: false; reason: 'no_account' | 'have_account' | 'unreachable' | 'refused'; message?: string };
+
+/**
+ * `intent` tells the server which door we are at. It is optional server-side,
+ * so an older build that omits it keeps the old flow.
+ */
+export async function requestOtp(mobile: string, intent?: 'signin' | 'signup'): Promise<{ requestId: string; channel?: string }> {
+  const r = await requestOtpResult(mobile, intent);
+  if (r.ok) return { requestId: r.requestId, channel: r.channel };
+  if (r.reason === 'unreachable') {
+    /* No offline fallback. A `mock-` requestId opened the OTP screen on a
+       request the server never saw, and the code below then accepted 123456
+       against it — a login with no account behind it. */
+    throw new Error('Could not reach Investoyard. Check your connection and try again.');
+  }
+  throw new Error(r.message ?? 'Could not send the code.');
 }
 
-export async function verifyOtp(requestId: string, otp: string): Promise<{ accessToken: string } | null> {
+/** The three-way form, for the login screen which needs to branch on it. */
+export async function requestOtpResult(mobile: string, intent?: 'signin' | 'signup'): Promise<OtpRequestResult> {
+  let res: Response;
   try {
-    const res = await fetch(`${API_BASE}/auth/otp/verify`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ requestId, otp }),
+    res = await fetch(`${API_BASE}/auth/otp/request`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(intent ? { mobile, intent } : { mobile }),
     });
-    if (res.ok) return res.json();
+  } catch { return { ok: false, reason: 'unreachable' }; }
+  if (res.ok) {
+    const j = await res.json().catch(() => null);
+    return j?.requestId ? { ok: true, requestId: j.requestId, channel: j.channel } : { ok: false, reason: 'refused' };
+  }
+  const b = await res.json().catch(() => null);
+  const message = typeof b?.message === 'string' ? b.message : undefined;
+  if (res.status === 404 || b?.code === 'NO_ACCOUNT') return { ok: false, reason: 'no_account', message };
+  if (res.status === 409 || b?.code === 'HAVE_ACCOUNT') return { ok: false, reason: 'have_account', message };
+  return { ok: false, reason: 'refused', message };
+}
+
+/**
+ * The outcome of verifying an OTP, as three different things rather than one
+ * null.
+ *
+ * It used to return `null` for every failure, so the screen said "Invalid
+ * code" whether the code was wrong, the server was unreachable, or — once
+ * signup became explicit — the number simply had no account yet. Telling a
+ * NEW user that their correct OTP was invalid is the worst of those three.
+ */
+export type VerifyResult =
+  | { ok: true; accessToken: string }
+  | { ok: false; reason: 'no_account' | 'bad_otp' | 'unreachable'; message?: string };
+
+/**
+ * `name` is sent only when signing UP; an unknown mobile without it is refused.
+ *
+ * NO client-side `123456`. The server decides, and in production only the real
+ * OTP is accepted (`SmsService`); an earlier version minted a `mock-token`
+ * whenever the API was merely unreachable, so every authed screen then failed
+ * one by one instead of the login saying what was wrong.
+ */
+export async function verifyOtp(requestId: string, otp: string, name?: string): Promise<VerifyResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/auth/otp/verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(name ? { requestId, otp, name } : { requestId, otp }),
+    });
+  } catch {
+    return { ok: false, reason: 'unreachable' };
+  }
+  if (res.ok) {
+    const j = await res.json().catch(() => null);
+    return j?.accessToken ? { ok: true, accessToken: j.accessToken } : { ok: false, reason: 'bad_otp' };
+  }
+  const body = await res.json().catch(() => null);
+  if (res.status === 404 || body?.code === 'NO_ACCOUNT') return { ok: false, reason: 'no_account' };
+  return { ok: false, reason: 'bad_otp', message: typeof body?.message === 'string' ? body.message : undefined };
+}
+
+
+/**
+ * Which sign-in methods this site can honour. Public — it describes the SITE,
+ * not an account. The login screen reads it so it never offers a door that
+ * cannot open.
+ *
+ * UNREACHABLE FALLS BACK TO "SMS AND PASSWORD", not to nothing: the login
+ * screen must still work on a flaky connection, and those two are what the
+ * server always supports. WhatsApp is the one that needs confirming, so it is
+ * the one left off.
+ */
+export interface AuthMethods { sms: boolean; whatsapp: boolean; password: boolean }
+export async function getAuthMethods(): Promise<AuthMethods> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/methods`);
+    if (res.ok) return await res.json();
   } catch {}
-  /* NO client-side '123456'. The server decides, and in production only the real
-     OTP is accepted (`SmsService`); this branch minted a `mock-token` whenever the
-     API was merely unreachable, so every authed screen then failed one by one
-     instead of the login saying what was wrong. */
+  return { sms: true, whatsapp: false, password: true };
+}
+
+/**
+ * Sign in with mobile + password.
+ *
+ * Same three-way result as verifyOtp, and for the same reason — but WITHOUT a
+ * `no_account` case, because the server deliberately will not say. Every
+ * password failure is one `bad_password` carrying the server’s own wording,
+ * which already names the way out (sign in with a code, set one in profile).
+ */
+export type PasswordResult =
+  | { ok: true; accessToken: string }
+  | { ok: false; reason: 'bad_password' | 'rate_limited' | 'unreachable'; message?: string };
+export async function passwordLogin(mobile: string, password: string): Promise<PasswordResult> {
+  let res: Response;
+  try {
+    res = await fetch(`${API_BASE}/auth/password/login`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mobile, password }),
+    });
+  } catch {
+    return { ok: false, reason: 'unreachable' };
+  }
+  if (res.ok) {
+    const j = await res.json().catch(() => null);
+    return j?.accessToken ? { ok: true, accessToken: j.accessToken } : { ok: false, reason: 'bad_password' };
+  }
+  const body = await res.json().catch(() => null);
+  const message = typeof body?.message === 'string' ? body.message : undefined;
+  return { ok: false, reason: res.status === 429 ? 'rate_limited' : 'bad_password', message };
+}
+
+// ---- the customer’s own security settings ----
+export interface SecuritySettings {
+  otpChannel: 'sms' | 'whatsapp';
+  hasPassword: boolean;
+  available: AuthMethods;
+}
+export async function getSecurity(token: string): Promise<SecuritySettings | null> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/security`, { headers: { Authorization: `Bearer ${token}` } });
+    if (res.ok) return await res.json();
+  } catch {}
   return null;
+}
+/** Returns the server’s message on refusal, so a rejected channel says why. */
+export async function setOtpChannel(token: string, channel: 'sms' | 'whatsapp'): Promise<{ ok: boolean; message?: string }> {
+  return authedPost(token, '/auth/security/otp-channel', { channel });
+}
+export async function setPassword(token: string, password: string): Promise<{ ok: boolean; message?: string }> {
+  return authedPost(token, '/auth/security/password', { password });
+}
+export async function clearPassword(token: string): Promise<{ ok: boolean; message?: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/security/password`, {
+      method: 'DELETE', headers: { Authorization: `Bearer ${token}` },
+    });
+    if (res.ok) return { ok: true };
+    const b = await res.json().catch(() => null);
+    return { ok: false, message: typeof b?.message === 'string' ? b.message : undefined };
+  } catch {
+    return { ok: false, message: 'Could not reach Investoyard.' };
+  }
+}
+async function authedPost(token: string, path: string, body: any): Promise<{ ok: boolean; message?: string }> {
+  try {
+    const res = await fetch(`${API_BASE}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+      body: JSON.stringify(body),
+    });
+    if (res.ok) return { ok: true };
+    const b = await res.json().catch(() => null);
+    const m = Array.isArray(b?.message) ? b.message.join(', ') : b?.message;
+    return { ok: false, message: typeof m === 'string' ? m : undefined };
+  } catch {
+    return { ok: false, message: 'Could not reach Investoyard.' };
+  }
 }
 
 export async function createApplication(token: string, input: CreateApplicationInput): Promise<ApplicationView> {
@@ -457,4 +617,29 @@ export async function removeWatchlist(token: string, ipoId: string): Promise<boo
     const res = await fetch(`${API_BASE}/watchlist/${ipoId}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
     return res.ok;
   } catch { return false; }
+}
+
+/**
+ * Is this stored session still backed by a real, active account?
+ *
+ * MIRRORS `checkConsumerSession` ON WEB, and exists for the same reason: the
+ * token was hydrated out of SecureStore on launch and trusted, so an account
+ * deleted or suspended in admin kept the app looking signed in until the token
+ * expired — up to 30 days. The enforcement is in the API (JwtAuthGuard resolves
+ * the subject and requires it to be active); this is what makes the app notice.
+ *
+ * THREE STATES, NOT TWO. Only an explicit rejection means the account is gone.
+ * A phone that is out of signal must keep its session — signing someone out on
+ * a dropped request would be worse than the bug being fixed, and a phone loses
+ * signal far more often than a browser does.
+ */
+export async function checkSession(token: string): Promise<'ok' | 'gone' | 'unknown'> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/me`, { headers: { Authorization: `Bearer ${token}` } });
+    if (res.ok) return 'ok';
+    if (res.status === 401 || res.status === 403 || res.status === 404) return 'gone';
+    return 'unknown';
+  } catch {
+    return 'unknown';
+  }
 }
