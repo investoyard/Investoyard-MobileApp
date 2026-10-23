@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, TextInput, View,
 } from 'react-native';
@@ -11,6 +11,9 @@ import { useProfiles, Relationship } from '../../components/profiles';
 import { getRelationships, getUpiHandles, RelationshipOption } from '../../lib/api';
 import { Card } from '../../components/ui/Card';
 import { SectionTitle } from '../../components/ui/SectionTitle';
+import { APPLICANT_ERR as ERR, APPLICANT_HELP as HELP } from '@investoyard/shared-types';
+import { PickerField, type PickOption } from '../../components/ui/PickerField';
+import { fetchBanks, fetchStates, searchBranches, searchCities, lookupPincode, type BankOption } from '../../lib/api';
 import { Button } from '../../components/ui/Button';
 import { CheckIcon, ChevronDownIcon } from '../../components/ui/icons';
 
@@ -70,6 +73,67 @@ export default function NewProfileScreen() {
   const [consent, setConsent] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  /* Set on the first save attempt; nothing inline is shown before it. */
+  const [tried, setTried] = useState(false);
+
+  /* ---- the bank / branch / pincode directory ------------------------
+   * `dirReady` is the SERVER’s answer, not a flag of ours: if the masters
+   * are empty every control below falls back to the plain text field it was
+   * before. Both lists are small and closed (1,348 banks, 36 states), so
+   * they load once and filter in memory; branches and cities are server
+   * queries because 1.82 lakh rows is not something to pull to a phone.
+   * ------------------------------------------------------------------ */
+  const [banks, setBanks] = useState<BankOption[]>([]);
+  const [stateList, setStateList] = useState<string[]>([]);
+  const [bankId, setBankId] = useState<string>('');
+  const [pinNote, setPinNote] = useState<string | null>(null);
+  const pinSeq = useRef(0);
+  const dirReady = banks.length > 0;
+
+  useEffect(() => {
+    fetchBanks().then(setBanks);
+    fetchStates().then((r) => setStateList(r.map((x) => x.name)));
+  }, []);
+
+  /* Resolve the saved bank NAME to an id once the list arrives — see above. */
+  useEffect(() => {
+    if (!banks.length || bankId || !bankName.trim()) return;
+    const hit = banks.find((b) => b.name.toLowerCase() === bankName.trim().toLowerCase());
+    if (hit) setBankId(hit.id);
+  }, [banks, bankId, bankName]);
+
+  /* THE API ALREADY RETURNS THE TWO-TIER ORDER and this must not re-sort it:
+     72 banks with 100+ branches first, biggest first, then the 1,276-bank
+     tail alphabetically. Ordered by NAME alone, the first twelve options
+     were an army credit co-operative and eleven district co-operatives
+     while State Bank of India sat at #1163. The headings are here so the
+     jump back to "A" at the boundary does not read as the list restarting. */
+  const bankOptions: PickOption[] = banks.map((b) => ({
+    value: b.id,
+    label: b.name,
+    group: b.major ? 'Most used' : 'All banks (A–Z)',
+  }));
+  const stateOptions: PickOption[] = stateList.map((n) => ({ value: n, label: n }));
+
+  /* A PINCODE FILLS ONLY WHAT IS EMPTY. Overwriting a city the applicant
+     typed would be the form correcting their own records against a
+     directory, and theirs is what the registrar matches on. */
+  useEffect(() => {
+    if (!dirReady || !/^[0-9]{6}$/.test(pincode)) { setPinNote(null); return; }
+    const mine = ++pinSeq.current;
+    const ac = new AbortController();
+    lookupPincode(pincode, ac.signal).then((r) => {
+      if (mine !== pinSeq.current) return;
+      if (!r) { setPinNote(ERR.pincodeUnknown); return; }
+      if (!city.trim() && r.city) setCity(r.city);
+      if (!stateName.trim() && r.state) setStateName(r.state);
+      /* 1,314 pincodes cover more than one district — 6.8%, not a rounding
+         error — and the import flags them rather than picking quietly. */
+      setPinNote(r.ambiguous ? HELP.pincodeAmbiguous : null);
+    });
+    return () => ac.abort();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pincode, dirReady]);
   // Allowed UPI handles (admin master) — a UPI ID saves only on a listed handle.
   const [upiHandles, setUpiHandles] = useState<string[]>([]);
   useEffect(() => { getUpiHandles().then(setUpiHandles); }, []);
@@ -112,14 +176,35 @@ export default function NewProfileScreen() {
   const upiFormatOk = !upiId || /^[\w.\-]{2,}@[a-zA-Z0-9]{2,}$/.test(upiId);
   const upiHandleOk = !upiId || !upiHandles.length || upiHandles.includes((upiId.split('@')[1] ?? '').toLowerCase());
   const upiOk = upiFormatOk && upiHandleOk;
-  const valid = fullName.trim() && panOk && dematOk && upiOk && (editing ? true : consent);
+  /* IFSC and mobile are OPTIONAL, so these only bite once something has been
+     typed into them. Web has validated both for months; mobile accepted a
+     malformed IFSC silently and printed it onto the ASBA form. */
+  const ifscOk = !ifsc || /^[A-Za-z]{4}0[A-Za-z0-9]{6}$/.test(ifsc);
+  const mobileOk = !mobile || mobile.length === 10;
+  const valid = fullName.trim() && panOk && dematOk && upiOk && ifscOk && mobileOk && (editing ? true : consent);
+
+  /* INLINE ERRORS WAIT FOR THE FIRST SAVE ATTEMPT. Telling someone their
+     half-typed PAN is malformed while they are still typing it is the form
+     arguing with them. */
+  const E = {
+    fullName: tried && !fullName.trim() ? ERR.fullName : null,
+    pan: tried && !panOk ? ERR.pan : null,
+    dpId: tried && !isCdsl && !/^[0-9]{6}$/.test(dpId) ? ERR.dpId : null,
+    clientId: tried && !dematOk && (isCdsl ? !/^[0-9]{16}$/.test(clientId) : !/^[0-9]{8}$/.test(clientId))
+      ? (isCdsl ? ERR.cdsl : ERR.clientId) : null,
+    ifsc: tried && !ifscOk ? ERR.ifsc : null,
+    mobile: tried && !mobileOk ? ERR.mobile : null,
+  };
 
   const onSave = async () => {
+    setTried(true);
     if (!valid) {
       setError(!editing && !consent ? 'Please give consent to continue'
         : !dematOk ? (isCdsl ? 'CDSL demat number must be 16 digits' : 'NSDL: DP ID is IN + 6 digits, Client ID is 8 digits')
         : !upiFormatOk ? 'Enter the UPI ID as name@handle (e.g. name@okaxis)'
         : !upiHandleOk ? `@${upiId.split('@')[1] ?? ''} is not a supported UPI handle`
+        : !ifscOk ? ERR.ifsc
+        : !mobileOk ? ERR.mobile
         : 'Please complete all fields with a valid PAN');
       return;
     }
@@ -177,16 +262,18 @@ export default function NewProfileScreen() {
               </Pressable>
             ))}
           </View>
+          <Text style={styles.segHelp}>{HELP.relationship}</Text>
         </Card>
 
         <SectionTitle label="Identity" style={{ marginTop: 24 }} />
         <Card>
-          <Field label={t('profile.fullName')} value={fullName} onChange={setFullName} first />
+          <Field label={t('profile.fullName')} value={fullName} onChange={setFullName} first help={HELP.fullName} error={E.fullName} />
           <Field
             label={panLocked ? `${t('profile.pan')} — locked (has applications)` : t('profile.pan')}
             value={pan} onChange={setPan} autoCapitalize="characters" maxLength={10}
             placeholder={editing ? `${editing.pan} — type to change` : 'ABCDE1234F'}
             mono editable={!panLocked}
+            help={panLocked ? HELP.panLocked : HELP.pan} error={E.pan}
           />
         </Card>
 
@@ -213,11 +300,12 @@ export default function NewProfileScreen() {
           </Text>
           {!isCdsl && (
             <Field label={`${t('profile.dpId')} — IN prefix is added automatically`} value={dpId}
-              onChange={(v) => setDpId(v.replace(/\D/g, '').slice(0, 6))} placeholder="301234 (6 digits)" maxLength={6} mono keyboard="number-pad" />
+              onChange={(v) => setDpId(v.replace(/\D/g, '').slice(0, 6))} placeholder="301234 (6 digits)" maxLength={6} mono keyboard="number-pad" help={HELP.dpId} error={E.dpId} />
           )}
           <Field label={isCdsl ? 'Demat number (16 digits)' : `${t('profile.clientId')} (8 digits)`} value={clientId}
             onChange={(v) => setClientId(v.replace(/\D/g, '').slice(0, isCdsl ? 16 : 8))}
-            placeholder={isCdsl ? '16-digit demat number' : '12345678'} maxLength={isCdsl ? 16 : 8} mono keyboard="number-pad" />
+            placeholder={isCdsl ? '16-digit demat number' : '12345678'} maxLength={isCdsl ? 16 : 8} mono keyboard="number-pad"
+            help={isCdsl ? HELP.cdsl : HELP.clientId} error={E.clientId} />
           {/* UPI is split: the user types only the name and PICKS the handle from
               the admin-managed master, so an unsupported handle is impossible. */}
           <View style={styles.upiWrap}>
@@ -296,17 +384,116 @@ export default function NewProfileScreen() {
           </Pressable>
           {!bankOpen ? null : (
           <>
-          <Field label="Mobile" value={mobile} onChange={(v) => setMobile(v.replace(/\D/g, '').slice(0, 10))} maxLength={10} placeholder="98XXXXXXXX" mono keyboard="number-pad" />
-          <Field label="Email" value={email} onChange={setEmail} placeholder="you@example.com" autoCapitalize="none" />
-          <Field label="Bank name" value={bankName} onChange={setBankName} placeholder="HDFC Bank" />
-          <Field label="Branch name" value={branchName} onChange={setBranchName} placeholder="MG Road" />
+          <Field label="Mobile" value={mobile} onChange={(v) => setMobile(v.replace(/\D/g, '').slice(0, 10))} maxLength={10} placeholder="98XXXXXXXX" mono keyboard="number-pad" help={HELP.mobile} error={E.mobile} />
+          <Field label="Email" value={email} onChange={setEmail} placeholder="you@example.com" autoCapitalize="none" help={HELP.email} />
+          {dirReady ? (
+            <>
+              <PickerField
+                label="Bank name"
+                selectedLabel={bankName}
+                placeholder="Select your bank"
+                options={bankOptions}
+                searchPlaceholder="Search 1,348 banks…"
+                help={HELP.bankPick}
+                onPick={(o) => {
+                  /* CHANGING THE BANK CLEARS THE BRANCH AND THE IFSC. Leaving
+                     either behind pairs a new bank with the old branch’s
+                     routing code — a plausible-looking IFSC that sends money
+                     to the wrong institution. */
+                  setBankId(o?.value ?? '');
+                  setBankName(o?.label ?? '');
+                  setBranchName('');
+                  setIfsc('');
+                }}
+              />
+              <PickerField
+                label="Branch"
+                selectedLabel={branchName}
+                placeholder={bankId ? 'Search for your branch' : 'Pick a bank first'}
+                disabled={!bankId}
+                searchPlaceholder="Branch name or city…"
+                help={ifsc ? HELP.branchPicked(ifsc) : HELP.branchPick}
+                search={async (q, signal) => {
+                  const rows = await searchBranches(bankId, q, signal);
+                  return rows.map((b) => ({
+                    value: b.id,
+                    label: b.branch,
+                    sub: [b.city, b.state].filter(Boolean).join(', ') + ' · ' + b.ifsc,
+                    meta: { ifsc: b.ifsc },
+                  }));
+                }}
+                onPick={async (o) => {
+                  setBranchName(o?.label ?? '');
+                  /* The IFSC comes from the branch, which is the whole point:
+                     nobody should type eleven characters they cannot check.
+                     Read off `meta`, never parsed back out of the label. */
+                  setIfsc(o?.meta?.ifsc ?? '');
+                }}
+              />
+            </>
+          ) : (
+            <>
+              <Field label="Bank name" value={bankName} onChange={setBankName} placeholder="HDFC Bank" help={HELP.bankName} />
+              <Field label="Branch name" value={branchName} onChange={setBranchName} placeholder="MG Road" help={HELP.branchName} />
+            </>
+          )}
           <Field label="Bank account no." value={bankAccount} onChange={setBankAccount}
-            placeholder={editing?.hasBank ? 'saved ✓ — type to replace' : undefined} autoCapitalize="none" mono />
-          <Field label="IFSC" value={ifsc} onChange={setIfsc} autoCapitalize="characters" placeholder="HDFC0001234" mono />
-          <Field label="Address" value={address} onChange={setAddress} />
-          <Field label="City" value={city} onChange={setCity} />
-          <Field label="State" value={stateName} onChange={setStateName} />
-          <Field label="Pincode" value={pincode} onChange={(v) => setPincode(v.replace(/\D/g, '').slice(0, 6))} maxLength={6} mono keyboard="number-pad" />
+            placeholder={editing?.hasBank ? 'saved ✓ — type to replace' : undefined} autoCapitalize="none" mono help={HELP.bankAccount} />
+          {dirReady ? (
+            /* HIDDEN, NOT REMOVED — it still saves and still prints on the
+               ASBA form. What goes away is asking for eleven characters
+               nobody can verify. A read-only DISPLAY rather than a disabled
+               input: a greyed box still reads as something the user failed
+               to fill, which is why the CDSL "Not needed" box went too. */
+            ifsc ? (
+              <View style={styles.ifscShow}>
+                <Text style={styles.ifscK}>IFSC</Text>
+                <Text style={styles.ifscV}>{ifsc}</Text>
+              </View>
+            ) : null
+          ) : (
+            <Field label="IFSC" value={ifsc} onChange={setIfsc} autoCapitalize="characters" placeholder="HDFC0001234" mono help={HELP.ifsc} error={E.ifsc} />
+          )}
+          <Field label="Address" value={address} onChange={setAddress} help={HELP.address} />
+          {dirReady ? (
+            <>
+              <PickerField
+                label="City"
+                selectedLabel={city}
+                placeholder="Search or type your city"
+                freeText
+                searchPlaceholder="City name…"
+                help={HELP.city}
+                /* SUGGESTIONS, not a closed list. A city the directory has
+                   never heard of must still be enterable — the registrar
+                   matches what the applicant’s BANK holds, not our import. */
+                search={async (q, signal) => {
+                  const rows = await searchCities(q, stateName || undefined, signal);
+                  return rows.map((c) => ({ value: c.city, label: c.city, sub: c.state ?? undefined }));
+                }}
+                onPick={(o) => {
+                  setCity(o?.label ?? '');
+                  if (o?.sub && !stateName.trim()) setStateName(o.sub);
+                }}
+              />
+              <PickerField
+                label="State"
+                selectedLabel={stateName}
+                placeholder="Select a state"
+                options={stateOptions}
+                searchPlaceholder="State or UT…"
+                help={HELP.state}
+                onPick={(o) => setStateName(o?.label ?? '')}
+              />
+            </>
+          ) : (
+            <>
+              <Field label="City" value={city} onChange={setCity} help={HELP.cityTyped} />
+              <Field label="State" value={stateName} onChange={setStateName} help={HELP.stateTyped} />
+            </>
+          )}
+          <Field label="Pincode" value={pincode} onChange={(v) => setPincode(v.replace(/\D/g, '').slice(0, 6))} maxLength={6} mono keyboard="number-pad"
+            help={dirReady ? (pinNote ?? HELP.pincode) : HELP.pincodeTyped} />
           </>
           )}
         </Card>
@@ -342,6 +529,10 @@ function Field(props: {
   label: string; value: string; onChange: (v: string) => void; placeholder?: string;
   autoCapitalize?: 'none' | 'characters'; maxLength?: number; first?: boolean; mono?: boolean;
   keyboard?: 'default' | 'number-pad'; editable?: boolean;
+  /* THE ERROR REPLACES THE HELP rather than stacking under it. Two lines of
+     competing advice under one input is worse than either alone — by the
+     time the help is wrong, what is wanted is the correction. */
+  help?: string; error?: string | null;
 }) {
   const [focused, setFocused] = useState(false);
   const locked = props.editable === false;
@@ -361,6 +552,11 @@ function Field(props: {
         keyboardType={props.keyboard ?? 'default'}
         editable={!locked}
       />
+      {props.error ? (
+        <Text style={styles.fieldErr}>{props.error}</Text>
+      ) : props.help ? (
+        <Text style={styles.fieldHelp}>{props.help}</Text>
+      ) : null}
     </>
   );
 }
@@ -372,6 +568,16 @@ const styles = StyleSheet.create({
   upiWarn: { fontFamily: fonts.semibold, fontWeight: '600', color: ui.red, fontSize: 12, marginTop: 2, lineHeight: 17 },
   // demat explainer
   dematNote: { fontFamily: fonts.regular, color: ui.muted, fontSize: 11.5, lineHeight: 16, marginTop: 10 },
+  /* Sits under its input, pulled up against it — the gap below belongs to the
+     NEXT label (`label` carries marginTop 16), so no margin is added here. */
+  fieldHelp: { fontFamily: fonts.regular, color: ui.muted, fontSize: 11.5, lineHeight: 16, marginTop: 6 },
+  fieldErr: { fontFamily: fonts.medium, fontWeight: '500', color: ui.red, fontSize: 11.5, lineHeight: 16, marginTop: 6 },
+  /* The relationship control is not a `Field`, so it carries its own. */
+  segHelp: { fontFamily: fonts.regular, color: ui.muted, fontSize: 11.5, lineHeight: 16, marginTop: 10 },
+  /* A STATEMENT, not an input — see the note at the call site. */
+  ifscShow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginTop: 16, paddingVertical: 4 },
+  ifscK: { ...microLabel, fontSize: 11 },
+  ifscV: { fontSize: 14.5, fontFamily: fonts.bold, fontWeight: '700', color: ui.title, fontVariant: ['tabular-nums'] },
   // split UPI input: name + handle picker
   upiWrap: { marginTop: 16 },
   upiLabel: { ...microLabel, fontSize: 11, marginBottom: 7 },
