@@ -7,8 +7,8 @@
  *   Mainboard/SME segment → stage-driven IPO cards.
  * One-time GMP awareness dialog (compliance).
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
-import { istToday } from '@investoyard/shared-types';
+import { useCallback, useEffect, useRef, useState, type ComponentRef } from 'react';
+import { compareForList, istToday } from '@investoyard/shared-types';
 import { Pressable, RefreshControl, ScrollView, StyleSheet, Text, TextInput, View } from 'react-native';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -16,7 +16,8 @@ import { setStatusBarStyle } from 'expo-status-bar';
 import { fonts, animateNext, shadowCard, ui } from '../../lib/theme';
 import { listingInfo, type IpoFull } from '../../lib/ipoCalc';
 import { stageOf } from '../../lib/ipoStage';
-import { getIpos, getNotifications } from '../../lib/api';
+import { getIposResult, getNotifications } from '../../lib/api';
+import { OfflineState } from '../../components/ui/OfflineState';
 import { useAuth } from '../../components/auth';
 import { fmtDate, titleCase } from '../../lib/format';
 import { tapLight } from '../../lib/haptics';
@@ -51,6 +52,8 @@ export default function HomeScreen() {
   const insets = useSafeAreaInsets();
   const { token } = useAuth();
   const [ipos, setIpos] = useState<IpoFull[] | null>(null);
+  /* distinct from `null` (still loading) and from an empty list. */
+  const [offline, setOffline] = useState(false);
   const [unread, setUnread] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [justRefreshed, setJustRefreshed] = useState(false);
@@ -59,17 +62,18 @@ export default function HomeScreen() {
   const [board, setBoard] = useState<Board>('all');
   const [searchOn, setSearchOn] = useState(false);
   const [query, setQuery] = useState('');
-  const searchRef = useRef<TextInput>(null);
+  const searchRef = useRef<ComponentRef<typeof TextInput>>(null);
 
   // light header (no gradient hero any more) → dark status-bar content
   useFocusEffect(useCallback(() => { setStatusBarStyle('dark'); }, []));
 
   const load = useCallback(async () => {
-    const [rows, notifs] = await Promise.all([
-      getIpos(),
+    const [res, notifs] = await Promise.all([
+      getIposResult(),
       token ? getNotifications(token).catch(() => []) : Promise.resolve([]),
     ]);
-    setIpos(rows);
+    setOffline(!res.ok);
+    setIpos(res.ok ? res.ipos : []);
     setUnread(notifs.filter((n: any) => !(n.readAt ?? n.read)).length);
   }, [token]);
 
@@ -94,14 +98,17 @@ export default function HomeScreen() {
   const searched = q
     ? base.filter((i) => i.name.toLowerCase().includes(q) || i.symbol.toLowerCase().includes(q))
     : base;
-  const openIpos = searched.filter((i) => i.status === 'open');
-  const upcoming = searched.filter((i) => i.status === 'upcoming');
-  const listed = searched.filter((i) => i.status === 'listed' || i.status === 'closed');
-  const filtered = filter === 'all' ? searched
-    : filter === 'closed' ? searched.filter((i) => i.status === 'closed' || i.status === 'listed')
-    : searched.filter((i) => i.status === filter);
+  /* Sorted ONCE, and the sections inherit it - filter() preserves order, so
+     every list below is in the same stage-aware order the web home uses. */
+  const sorted = [...searched].sort(compareForList);
+  const openIpos = sorted.filter((i) => i.status === 'open');
+  const upcoming = sorted.filter((i) => i.status === 'upcoming');
+  const listed = sorted.filter((i) => i.status === 'listed' || i.status === 'closed');
+  const filtered = filter === 'all' ? sorted
+    : filter === 'closed' ? sorted.filter((i) => i.status === 'closed' || i.status === 'listed')
+    : sorted.filter((i) => i.status === filter);
   const counts: Record<Filter, number> = {
-    all: searched.length, open: openIpos.length, upcoming: upcoming.length, closed: listed.length,
+    all: sorted.length, open: openIpos.length, upcoming: upcoming.length, closed: listed.length,
   };
 
   const shortDate = (s?: string) => { const f = fmtDate(s); return f === '—' ? 'TBA' : f.slice(0, 6); };
@@ -111,6 +118,15 @@ export default function HomeScreen() {
   const hasTodayEvents = (ipos ?? []).some((i) =>
     i.openDate === todayIso || i.closeDate === todayIso || i.allotmentDate === todayIso || i.listingDate === todayIso);
   const liveCount = (ipos ?? []).filter((i) => i.status === 'open').length;
+  /* The web home's today strip, same expressions and the same IST day, so the
+     two surfaces cannot report different numbers for the same morning.
+     `liveCount` above IS web's `open`, so only the other three are new. */
+  const today = {
+    closing: (ipos ?? []).filter((i) => i.status === 'open' && i.closeDate === todayIso).length,
+    allotment: (ipos ?? []).filter((i) => i.allotmentDate === todayIso).length,
+    listing: (ipos ?? []).filter((i) => i.listingDate === todayIso).length,
+  };
+  const todayTotal = today.closing + today.allotment + today.listing;
 
   const openSearch = () => {
     tapLight(); animateNext(); setSearchOn(true);
@@ -186,6 +202,15 @@ export default function HomeScreen() {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={ui.indigo} colors={[ui.indigo]} />
         }
       >
+        {todayTotal > 0 ? (
+          <View style={styles.todayRow}>
+            <Text style={styles.todayLbl}>Today</Text>
+            {today.closing > 0 ? <Text style={styles.todayItem}>{today.closing} closing</Text> : null}
+            {today.allotment > 0 ? <Text style={styles.todayItem}>{today.allotment} allotment</Text> : null}
+            {today.listing > 0 ? <Text style={styles.todayItem}>{today.listing} listing</Text> : null}
+          </View>
+        ) : null}
+
         {/* ── status chips WITH counts (summary + filter in one control) ── */}
         <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filters}>
           {FILTERS.map(({ key, label }) => {
@@ -227,6 +252,8 @@ export default function HomeScreen() {
             <SkeletonCard lines={3} />
             <SkeletonCard lines={2} />
           </View>
+        ) : offline ? (
+          <OfflineState onRetry={load} />
         ) : q ? (
           /* search results — one flat list, no sectioning */
           filtered.length === 0 ? (
@@ -394,6 +421,9 @@ const styles = StyleSheet.create({
   searchClose: { width: 26, height: 26, borderRadius: 13, alignItems: 'center', justifyContent: 'center', backgroundColor: ui.slateTint },
   // status chips with live counts
   filters: { paddingHorizontal: 16, paddingTop: 14, paddingBottom: 10, gap: 8, flexDirection: 'row' },
+  todayRow: { flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 10, paddingHorizontal: 16, paddingTop: 12 },
+  todayLbl: { fontFamily: fonts.bold, fontWeight: '700', fontSize: 12, color: ui.title, letterSpacing: 0.3, textTransform: 'uppercase' },
+  todayItem: { fontFamily: fonts.regular, fontSize: 12.5, color: ui.muted },
   fchip: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
     paddingHorizontal: 14, height: 36, borderRadius: 999, backgroundColor: '#ffffff', ...shadowCard, elevation: 1,

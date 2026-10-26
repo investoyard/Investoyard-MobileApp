@@ -103,14 +103,48 @@ export const lookupPincode = (pin: string, signal?: AbortSignal) =>
 
 // The API's list endpoint returns full detail rows (same serializer as by-symbol),
 // so cards can show subscription/reservation/lot expanders without a second fetch.
-export async function getIpos(): Promise<IpoFull[]> {
+/**
+ * The catalogue, WITH whether we actually reached the server.
+ *
+ * `getIpos()` collapses a network failure and an empty catalogue into the
+ * same `[]`, so a screen cannot tell "no IPOs today" from "the API is
+ * unreachable" - which is exactly what happened on 2026-10-26, when two test
+ * devices showed an empty home screen and the only way to tell was the IIS
+ * access log. A non-200 counts as unreachable too: a 502 is not an empty
+ * catalogue.
+ */
+export type IposResult =
+  | { ok: true; ipos: IpoFull[] }
+  | { ok: false; reason: 'unreachable' };
+
+export async function getIposResult(): Promise<IposResult> {
   try {
     const res = await fetch(`${API_BASE}/ipos`);
-    if (!res.ok) return [];
-    return ((await res.json()) as IpoDetail[]).map(enrich);
-  } catch {
-    return [];
+    if (!res.ok) {
+      /* A STATUS means we reached something and it refused us - a Cloudflare
+         challenge (403/503) looks nothing like a dead network, and only the
+         status tells them apart. */
+      if (__DEV__) console.warn(`[api] GET ${API_BASE}/ipos -> HTTP ${res.status} ${res.statusText}`);
+      return { ok: false, reason: 'unreachable' };
+    }
+    return { ok: true, ipos: ((await res.json()) as IpoDetail[]).map(enrich) };
+  } catch (e: any) {
+    /* NO status means the request never completed: DNS, TLS trust, a blocked
+       port, or a dropped connection. React Native reports most of these as the
+       same "Network request failed", so the message is the only clue there is. */
+    if (__DEV__) console.warn(`[api] GET ${API_BASE}/ipos FAILED before any response: ${e?.message ?? e}`);
+    return { ok: false, reason: 'unreachable' };
   }
+}
+
+/**
+ * Unchanged contract, on purpose. Callers that do not care about reachability
+ * keep working exactly as before rather than being made to handle a throw they
+ * were never written for.
+ */
+export async function getIpos(): Promise<IpoFull[]> {
+  const r = await getIposResult();
+  return r.ok ? r.ipos : [];
 }
 
 export async function getIpo(symbol: string): Promise<IpoFull | undefined> {
