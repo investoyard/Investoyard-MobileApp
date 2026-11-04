@@ -20,7 +20,7 @@ import Svg, { Path, Polyline } from 'react-native-svg';
 import { fmtRange, inr, priceBand, stripHtml, closesInLabel, titleCase } from '../../lib/format';
 import { stageOf } from '../../lib/ipoStage';
 import { Card } from '../../components/ui/Card';
-import { Chip, ChipTone } from '../../components/ui/Chip';
+import { Chip } from '../../components/ui/Chip';
 import { SectionTitle } from '../../components/ui/SectionTitle';
 import { Button } from '../../components/ui/Button';
 import { ExpandTile } from '../../components/ui/ExpandTile';
@@ -34,12 +34,10 @@ import { RemindBell } from '../../components/RemindBell';
 import { exchangeLabels, LABEL, docLabel, isPublicDoc, type DayEntry, type HourEntry } from '@investoyard/shared-types';
 import { DayWisePanel } from '../../components/DayWisePanel';
 
-/* Mirrors STAGE_TONE in @investoyard/shared-types: live green · soon indigo ·
-   listed purple · quiet grey. Upcoming used to be 'warn' (yellow) and listed
-   plain grey, which put this screen out of step with the cards and with web. */
-const STATUS_TONE: Record<string, ChipTone> = {
-  open: 'success', upcoming: 'brand', closed: 'closing', listed: 'listed', withdrawn: 'closing',
-};
+/* No status->tone map here on purpose. The chip on this screen reads
+   stageOf(ipo).tone, so a second map was dead code that keyed off the
+   COARSE ipo.status and knew nothing of Pre Apply or Awaiting - exactly
+   the shape that drifts away from the one legend in Chip.tsx. */
 
 export default function IpoDetailScreen() {
   const t = useT();
@@ -365,7 +363,7 @@ export default function IpoDetailScreen() {
                 <View>
                   {/* Same inline label TrendBlock uses above it, so the two
                       headings in this section are one style and not two. */}
-                  <Text style={{ ...microLabel, fontSize: 10.5, marginBottom: 2 }}>Subscription by day</Text>
+                  <Text style={{ ...microLabel, marginBottom: 2 }}>Subscription by day</Text>
                   <DayWisePanel subLog={subLog} subLogHour={subLogHour} closeDate={ipo.closeDate ?? undefined} />
                 </View>
               ) : null}
@@ -540,7 +538,7 @@ function TrendBlock({ label, points, first, lastDay, lastValue, color }: {
   return (
     <View>
       <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-        <Text style={{ ...microLabel, fontSize: 10.5 }}>{label}</Text>
+        <Text style={{ ...microLabel }}>{label}</Text>
         <Text style={{ fontSize: 14, fontFamily: fonts.extrabold, fontWeight: '800', color, fontVariant: ['tabular-nums'] }}>{lastValue}</Text>
       </View>
       <Svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ marginTop: 6 }}>
@@ -586,13 +584,13 @@ const styles = StyleSheet.create({
   metricsCard: { marginTop: 10, padding: 0 },
   metricsRow: { flexDirection: 'row' },
   metric: { flex: 1, paddingHorizontal: 16, paddingVertical: 13 },
-  metricK: { ...microLabel, fontSize: 10.5 },
+  metricK: { ...microLabel },
   metricV: { fontSize: 17, fontFamily: fonts.extrabold, fontWeight: '800', letterSpacing: -0.3, color: ui.title, marginTop: 4, fontVariant: ['tabular-nums'] },
   mDivV: { width: 1, backgroundColor: ui.divider, marginVertical: 10 },
   mDivH: { height: 1, backgroundColor: ui.divider, marginHorizontal: 16 },
   // listing-performance statement card
   perfCard: {},
-  perfK: { ...microLabel, fontSize: 10.5, color: ui.slate },
+  perfK: { ...microLabel, color: ui.slate },
   perfRow: { flexDirection: 'row', alignItems: 'center', gap: 10, marginTop: 4 },
   perfV: { fontSize: 26, fontFamily: fonts.extrabold, fontWeight: '800', letterSpacing: -0.5, color: ui.title, fontVariant: ['tabular-nums'] },
   perfPill: { borderRadius: 999, paddingHorizontal: 10, paddingVertical: 4 },
@@ -623,7 +621,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1, borderBottomColor: ui.divider,
   },
   kvK: { fontFamily: fonts.regular, fontSize: 14, color: ui.slate },
-  trendDay: { fontSize: 10, fontFamily: fonts.semibold, fontWeight: '600', color: ui.slate },
+  trendDay: { fontSize: 11, fontFamily: fonts.semibold, fontWeight: '600', color: ui.slate },
   kvV: { fontSize: 14, fontFamily: fonts.bold, fontWeight: '700', color: ui.title, flexShrink: 1, textAlign: 'right' },
   applyBar: {
     position: 'absolute', left: 0, right: 0, bottom: 0,
@@ -633,7 +631,7 @@ const styles = StyleSheet.create({
     borderTopWidth: 1, borderTopColor: ui.divider,
     ...shadowCard,
   },
-  applyK: { ...microLabel, fontSize: 10.5 },
+  applyK: { ...microLabel },
   applyV: { fontSize: 18, fontFamily: fonts.extrabold, fontWeight: '800', color: ui.title, marginTop: 2, fontVariant: ['tabular-nums'] },
   applyCloses: { fontSize: 11.5, color: ui.amber, fontFamily: fonts.bold, fontWeight: '700', marginTop: 2 },
   applySub: { fontSize: 11.5, color: ui.indigo, fontFamily: fonts.bold, fontWeight: '700', marginTop: 2, fontVariant: ['tabular-nums'] },
